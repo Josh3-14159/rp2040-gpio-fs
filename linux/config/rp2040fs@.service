@@ -1,0 +1,20 @@
+[Unit]
+Description=RP2040 GPIO Filesystem
+After=dev-rp2040_gpio_fs.device
+Requires=dev-rp2040_gpio_fs.device
+BindsTo=dev-rp2040_gpio_fs.device
+
+[Service]
+Type=simple
+User=%i
+ExecStartPre=/bin/mkdir -p /mnt/rp2040
+ExecStartPre=/bin/chown %i:%i /mnt/rp2040
+ExecStartPre=/bin/sleep 1
+ExecStart=/usr/local/bin/rp2040fs /mnt/rp2040 --device /dev/rp2040_gpio_fs
+ExecStop=/bin/fusermount3 -u /mnt/rp2040
+Restart=on-failure
+RestartSec=5
+RestartPreventExitStatus=1
+
+[Install]
+WantedBy=dev-rp2040_gpio_fs.device

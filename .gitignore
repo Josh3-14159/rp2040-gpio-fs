@@ -1,0 +1,10 @@
+# Build outputs
+firmware/build/
+linux/rp2040fs
+linux/*.o
+
+# Editor artifacts
+*.swp
+*.swo
+.vscode/
+linux/fs_app/rp2040fs
