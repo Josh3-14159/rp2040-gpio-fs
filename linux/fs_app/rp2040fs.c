@@ -26,6 +26,7 @@
 #include <time.h>
 #include <sys/ioctl.h>
 #include <linux/serial.h>
+#include <syslog.h>
 
 // ----------------------------------------------------------------
 // Pin table — must match firmware
@@ -163,10 +164,8 @@ static char *cmd(const char *fmt, ...) {
         if (serial_cmd(cmdbuf, resp, sizeof(resp)) == 0) {
             consecutive_errors = 0;
         
-        if (verbose) {
-            fprintf(stderr, "CMD: %s -> %s\n", cmdbuf, resp);
-            fflush(stderr);
-            }            
+        if (verbose)
+            syslog(LOG_DEBUG, "CMD: %s -> %s", cmdbuf, resp);            
             return resp;
         }
 
@@ -544,6 +543,9 @@ int main(int argc, char *argv[]) {
     pthread_t wdog;
     pthread_create(&wdog, NULL, watchdog_thread, NULL);
     pthread_detach(wdog);
+
+// Open syslog for verbose command logging
+    openlog("rp2040fs", LOG_PID, LOG_DAEMON);
 
     fuse_opt_add_arg(&args, "-s");
     fuse_opt_add_arg(&args, "-f");
