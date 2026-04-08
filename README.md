@@ -91,6 +91,40 @@ duty cycle resolution at the requested frequency.
 
 ---
 
+## Quick install
+
+On any Ubuntu machine, clone the repo and run the installer:
+
+```bash
+git clone https://github.com/Josh3-14159/rp2040-gpio-fs.git
+cd rp2040-gpio-fs/linux
+chmod +x install.sh
+./install.sh
+```
+
+The installer will:
+- Install required system packages (`libfuse3-dev`, `gcc`, etc.)
+- Build and install the `rp2040fs` FUSE daemon
+- Install the udev rule so the board is recognised on plug-in
+- Install the systemd service so the filesystem mounts automatically
+- Create `/mnt/rp2040` with correct permissions
+- Add your user to the `dialout` group
+
+Then flash the firmware to the board:
+1. Hold **BOOT** on the RP2040 Zero
+2. Plug in USB while holding BOOT — release BOOT
+3. Copy the pre-compiled UF2:
+
+```bash
+cp firmware/rp2040_gpio_fs.uf2 /media/$USER/RPI-RP2/
+```
+
+Plug the board back in normally — the filesystem mounts at `/mnt/rp2040` automatically.
+
+> **Note:** If you were added to the `dialout` group during installation, log out and back in before use.
+
+---
+
 ## Repository layout
 
 ```
