@@ -7,6 +7,10 @@
  * Mount:
  *   ./rp2040fs /mnt/rp2040 [--device /dev/ttyACM0]
  *
+ * Mount with logging:
+ *   ./rp2040fs /mnt/rp2040 --device /dev/ttyACM0 --verbose
+ *   ./rp2040fs /mnt/rp2040 --device /dev/ttyACM0 --log /var/log/rp2040fs.log
+ *
  * Unmount:
  *   fusermount3 -u /mnt/rp2040
  */
@@ -26,11 +30,7 @@
 #include <time.h>
 #include <sys/ioctl.h>
 #include <linux/serial.h>
-#include <syslog.h>
 
-// ----------------------------------------------------------------
-// Pin table — must match firmware
-// ----------------------------------------------------------------
 static const int EXPOSED_PINS[] = {
     0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,
     16,17,18,19,20,21,22,
@@ -52,18 +52,35 @@ static int pin_is_exposed(int pin) {
     return 0;
 }
 
-// ----------------------------------------------------------------
-// Serial port — with reconnection, retry, and protocol recovery
-// ----------------------------------------------------------------
+static int   verbose  = 0;
+static FILE *logfile  = NULL;
+static pthread_mutex_t log_lock = PTHREAD_MUTEX_INITIALIZER;
+
+static void vlog(const char *fmt, ...) {
+    if (!verbose) return;
+    time_t t = time(NULL);
+    struct tm *tm = localtime(&t);
+    char ts[32];
+    strftime(ts, sizeof(ts), "%Y-%m-%d %H:%M:%S", tm);
+    pthread_mutex_lock(&log_lock);
+    FILE *dest = logfile ? logfile : stderr;
+    fprintf(dest, "[%s] ", ts);
+    va_list ap;
+    va_start(ap, fmt);
+    vfprintf(dest, fmt, ap);
+    va_end(ap);
+    fprintf(dest, "\n");
+    fflush(dest);
+    pthread_mutex_unlock(&log_lock);
+}
+
 static int serial_fd = -1;
 static pthread_mutex_t serial_lock = PTHREAD_MUTEX_INITIALIZER;
 static const char *device_path = "/dev/ttyACM0";
-static int verbose = 0;
 
 #define MAX_CONSECUTIVE_ERRORS 3
 static int consecutive_errors = 0;
 
-// Forward declaration — serial_reconnect calls serial_cmd
 static int serial_cmd(const char *command, char *resp, size_t resp_len);
 
 static int serial_open(const char *path) {
@@ -101,6 +118,7 @@ static int serial_open(const char *path) {
 
 static int serial_reconnect(void) {
     fprintf(stderr, "Serial: reconnecting to %s...\n", device_path);
+    vlog("Serial: reconnecting to %s", device_path);
     if (serial_fd >= 0) {
         close(serial_fd);
         serial_fd = -1;
@@ -113,6 +131,7 @@ static int serial_reconnect(void) {
             if (serial_cmd("PING", resp, sizeof(resp)) == 0 &&
                 strcmp(resp, "PONG") == 0) {
                 fprintf(stderr, "Serial: reconnected OK.\n");
+                vlog("Serial: reconnected OK");
                 consecutive_errors = 0;
                 return 0;
             }
@@ -123,6 +142,7 @@ static int serial_reconnect(void) {
     }
 
     fprintf(stderr, "Serial: reconnect failed after 10 attempts.\n");
+    vlog("Serial: reconnect failed after 10 attempts");
     return -1;
 }
 
@@ -149,7 +169,6 @@ static int serial_cmd(const char *command, char *resp, size_t resp_len) {
 }
 
 static char *cmd(const char *fmt, ...) {
-    if (verbose) syslog(LOG_INFO, "cmd() called");
     static char resp[256];
     char cmdbuf[256];
     va_list ap;
@@ -164,15 +183,15 @@ static char *cmd(const char *fmt, ...) {
 
         if (serial_cmd(cmdbuf, resp, sizeof(resp)) == 0) {
             consecutive_errors = 0;
-        
-        if (verbose)
-            syslog(LOG_DEBUG, "CMD: %s -> %s", cmdbuf, resp);            
+            vlog("CMD: %s -> %s", cmdbuf, resp);
             return resp;
         }
 
         consecutive_errors++;
         fprintf(stderr, "Serial: command '%s' failed (error %d/%d)\n",
                 cmdbuf, consecutive_errors, MAX_CONSECUTIVE_ERRORS);
+        vlog("Serial: command '%s' failed (error %d/%d)",
+             cmdbuf, consecutive_errors, MAX_CONSECUTIVE_ERRORS);
 
         if (consecutive_errors >= MAX_CONSECUTIVE_ERRORS) {
             fprintf(stderr, "Serial: too many errors, forcing reconnect.\n");
@@ -183,9 +202,6 @@ static char *cmd(const char *fmt, ...) {
     return NULL;
 }
 
-// ----------------------------------------------------------------
-// Watchdog thread — pings firmware every 10s, reconnects if dead
-// ----------------------------------------------------------------
 static void *watchdog_thread(void *arg) {
     (void)arg;
     while (1) {
@@ -194,26 +210,13 @@ static void *watchdog_thread(void *arg) {
         char *resp = cmd("PING");
         if (!resp || strcmp(resp, "PONG") != 0) {
             fprintf(stderr, "Watchdog: firmware not responding, reconnecting.\n");
+            vlog("Watchdog: firmware not responding, reconnecting");
             serial_reconnect();
         }
         pthread_mutex_unlock(&serial_lock);
     }
     return NULL;
 }
-
-// ----------------------------------------------------------------
-// Virtual filesystem structure
-//
-// Paths:
-//   /                          — root dir
-//   /gpio/                     — gpio dir
-//   /gpio/gpioN/               — per-pin dir
-//   /gpio/gpioN/mode           — file
-//   /gpio/gpioN/value          — file
-//   /gpio/gpioN/pull           — file
-//   /gpio/gpioN/pwm_freq       — file
-//   /gpio/gpioN/pwm_duty       — file
-// ----------------------------------------------------------------
 
 typedef enum {
     NODE_ROOT,
@@ -235,10 +238,7 @@ typedef struct {
 static path_info_t parse_path(const char *path) {
     path_info_t info = { NODE_UNKNOWN, -1 };
 
-    if (strcmp(path, "/") == 0) {
-        info.type = NODE_ROOT;
-        return info;
-    }
+    if (strcmp(path, "/") == 0) { info.type = NODE_ROOT; return info; }
 
     if (strcmp(path, "/gpio") == 0 || strcmp(path, "/gpio/") == 0) {
         info.type = NODE_GPIO_DIR;
@@ -279,17 +279,11 @@ static path_info_t parse_path(const char *path) {
     return info;
 }
 
-// ----------------------------------------------------------------
-// FUSE operations
-// ----------------------------------------------------------------
-
 static int rp_getattr(const char *path, struct stat *st,
                       struct fuse_file_info *fi) {
     (void)fi;
     memset(st, 0, sizeof(*st));
-
     path_info_t info = parse_path(path);
-
     switch (info.type) {
         case NODE_ROOT:
         case NODE_GPIO_DIR:
@@ -297,7 +291,6 @@ static int rp_getattr(const char *path, struct stat *st,
             st->st_mode  = S_IFDIR | 0755;
             st->st_nlink = 2;
             return 0;
-
         case NODE_FILE_MODE:
         case NODE_FILE_VALUE:
         case NODE_FILE_PULL:
@@ -307,7 +300,6 @@ static int rp_getattr(const char *path, struct stat *st,
             st->st_nlink = 1;
             st->st_size  = 64;
             return 0;
-
         default:
             return -ENOENT;
     }
@@ -317,17 +309,13 @@ static int rp_readdir(const char *path, void *buf, fuse_fill_dir_t filler,
                       off_t offset, struct fuse_file_info *fi,
                       enum fuse_readdir_flags flags) {
     (void)offset; (void)fi; (void)flags;
-
     path_info_t info = parse_path(path);
-
     filler(buf, ".",  NULL, 0, 0);
     filler(buf, "..", NULL, 0, 0);
-
     if (info.type == NODE_ROOT) {
         filler(buf, "gpio", NULL, 0, 0);
         return 0;
     }
-
     if (info.type == NODE_GPIO_DIR) {
         char name[16];
         for (int i = 0; i < NUM_PINS; i++) {
@@ -336,7 +324,6 @@ static int rp_readdir(const char *path, void *buf, fuse_fill_dir_t filler,
         }
         return 0;
     }
-
     if (info.type == NODE_PIN_DIR) {
         filler(buf, "mode",     NULL, 0, 0);
         filler(buf, "value",    NULL, 0, 0);
@@ -345,7 +332,6 @@ static int rp_readdir(const char *path, void *buf, fuse_fill_dir_t filler,
         filler(buf, "pwm_duty", NULL, 0, 0);
         return 0;
     }
-
     return -ENOTDIR;
 }
 
@@ -379,7 +365,6 @@ static int rp_read(const char *path, char *buf, size_t size, off_t offset,
                 snprintf(content, sizeof(content), "%s\n", resp);
             break;
         }
-
         case NODE_FILE_VALUE: {
             resp = cmd("GET %d", pin);
             if (!resp) { pthread_mutex_unlock(&serial_lock); return -EIO; }
@@ -391,7 +376,6 @@ static int rp_read(const char *path, char *buf, size_t size, off_t offset,
                 snprintf(content, sizeof(content), "%s\n", resp);
             break;
         }
-
         case NODE_FILE_PULL: {
             resp = cmd("GETPULL %d", pin);
             if (!resp) { pthread_mutex_unlock(&serial_lock); return -EIO; }
@@ -401,7 +385,6 @@ static int rp_read(const char *path, char *buf, size_t size, off_t offset,
                 snprintf(content, sizeof(content), "%s\n", resp);
             break;
         }
-
         case NODE_FILE_PWM_FREQ:
         case NODE_FILE_PWM_DUTY: {
             resp = cmd("GETMODE %d", pin);
@@ -418,7 +401,6 @@ static int rp_read(const char *path, char *buf, size_t size, off_t offset,
             }
             break;
         }
-
         default:
             pthread_mutex_unlock(&serial_lock);
             return -ENOENT;
@@ -488,9 +470,6 @@ static int rp_write(const char *path, const char *buf, size_t size,
     return (int)size;
 }
 
-// ----------------------------------------------------------------
-// FUSE ops table
-// ----------------------------------------------------------------
 static const struct fuse_operations rp_ops = {
     .getattr = rp_getattr,
     .readdir = rp_readdir,
@@ -499,13 +478,12 @@ static const struct fuse_operations rp_ops = {
     .write   = rp_write,
 };
 
-// ----------------------------------------------------------------
-// main
-// ----------------------------------------------------------------
 static void usage(const char *prog) {
     fprintf(stderr,
-        "Usage: %s <mountpoint> [FUSE options] [--device <tty>]\n"
-        "  --device   Serial device (default: /dev/ttyACM0)\n",
+        "Usage: %s <mountpoint> [FUSE options] [--device <tty>] [--verbose] [--log <file>]\n"
+        "  --device   Serial device (default: /dev/ttyACM0)\n"
+        "  --verbose  Log all serial commands (default log: /var/log/rp2040fs.log)\n"
+        "  --log      Log file path (implies --verbose)\n",
         prog);
 }
 
@@ -513,15 +491,32 @@ int main(int argc, char *argv[]) {
     struct fuse_args args = FUSE_ARGS_INIT(0, NULL);
     fuse_opt_add_arg(&args, argv[0]);
 
+    const char *log_path = NULL;
+
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--device") == 0 && i + 1 < argc) {
             device_path = argv[++i];
         } else if (strcmp(argv[i], "--verbose") == 0 ||
                    strcmp(argv[i], "-v") == 0) {
             verbose = 1;
+        } else if (strcmp(argv[i], "--log") == 0 && i + 1 < argc) {
+            verbose = 1;
+            log_path = argv[++i];
         } else {
             fuse_opt_add_arg(&args, argv[i]);
         }
+    }
+
+    // Open log file before fuse_main() redirects file descriptors
+    if (verbose) {
+        const char *path = log_path ? log_path : "/var/log/rp2040fs.log";
+        logfile = fopen(path, "a");
+        if (!logfile) {
+            fprintf(stderr, "Warning: could not open log file %s, logging to stderr\n", path);
+        } else {
+            fprintf(stderr, "Logging serial traffic to %s\n", path);
+        }
+        vlog("--- rp2040fs started ---");
     }
 
     serial_fd = serial_open(device_path);
@@ -530,6 +525,7 @@ int main(int argc, char *argv[]) {
         return 1;
     }
     fprintf(stderr, "Connected to %s\n", device_path);
+    vlog("Connected to %s", device_path);
 
     pthread_mutex_lock(&serial_lock);
     char *resp = cmd("PING");
@@ -539,20 +535,22 @@ int main(int argc, char *argv[]) {
                 resp ? resp : "<timeout>");
     } else {
         fprintf(stderr, "Device alive.\n");
+        vlog("Device alive");
     }
 
     pthread_t wdog;
     pthread_create(&wdog, NULL, watchdog_thread, NULL);
     pthread_detach(wdog);
 
-// Open syslog for verbose command logging
-    openlog("rp2040fs", LOG_PID, LOG_DAEMON);
-
     fuse_opt_add_arg(&args, "-s");
     fuse_opt_add_arg(&args, "-f");
 
     int ret = fuse_main(args.argc, args.argv, &rp_ops, NULL);
 
+    if (logfile) {
+        vlog("--- rp2040fs stopped ---");
+        fclose(logfile);
+    }
     close(serial_fd);
     fuse_opt_free_args(&args);
     return ret;
