@@ -206,7 +206,7 @@ static void handle_command(char *line) {
 
     if (strcmp(tok, "GET") == 0) {
         if (!s->initialised) set_pin_mode((uint8_t)pin, MODE_IN);
-        if (s->mode == MODE_IN) {
+        if (s->mode == MODE_IN || s->mode == MODE_OUT) {
             snprintf(resp, sizeof(resp), "VAL %d\n", gpio_get((uint)pin) ? 1 : 0);
             cdc_send(resp);
         } else if (s->mode == MODE_ADC) {
