@@ -1,0 +1,13 @@
+[Unit]
+Description=RP2040 GPIO Filesystem Keepalive
+After=network.target
+
+[Service]
+Type=simple
+User=root
+ExecStart=/usr/local/bin/rp2040fs-keepalive
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

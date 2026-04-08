@@ -1,0 +1,40 @@
+#!/usr/bin/env bash
+# rp2040fs-keepalive
+# Runs as root at boot. Polls for the RP2040 device every 5 seconds.
+# Starts rp2040fs@USER when device appears, stops it when device is removed.
+# USERNAME is substituted at install time.
+
+set -euo pipefail
+
+DEVICE="/dev/rp2040_gpio_fs"
+SERVICE="rp2040fs@RP2040FS_USER"
+POLL_INTERVAL=5
+
+log() { echo "$(date '+%Y-%m-%d %H:%M:%S') rp2040fs-keepalive: $1" | tee /dev/kmsg 2>/dev/null || true; }
+
+log "Starting — watching for $DEVICE every ${POLL_INTERVAL}s"
+
+LAST_STATE=""
+
+while true; do
+    if [ -e "$DEVICE" ]; then
+        if ! systemctl is-active --quiet "$SERVICE"; then
+            log "Device present, service not running — starting $SERVICE"
+            systemctl start "$SERVICE" || log "WARNING: failed to start $SERVICE"
+        fi
+        STATE="present"
+    else
+        if systemctl is-active --quiet "$SERVICE"; then
+            log "Device absent, stopping $SERVICE"
+            systemctl stop "$SERVICE" || true
+        fi
+        STATE="absent"
+    fi
+
+    if [ "$STATE" != "$LAST_STATE" ]; then
+        log "Device state changed: $STATE"
+        LAST_STATE="$STATE"
+    fi
+
+    sleep "$POLL_INTERVAL"
+done
