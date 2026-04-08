@@ -149,6 +149,7 @@ static int serial_cmd(const char *command, char *resp, size_t resp_len) {
 }
 
 static char *cmd(const char *fmt, ...) {
+    if (verbose) syslog(LOG_INFO, "cmd() called");
     static char resp[256];
     char cmdbuf[256];
     va_list ap;
