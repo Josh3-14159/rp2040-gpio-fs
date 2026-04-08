@@ -162,8 +162,11 @@ static char *cmd(const char *fmt, ...) {
 
         if (serial_cmd(cmdbuf, resp, sizeof(resp)) == 0) {
             consecutive_errors = 0;
-            if (verbose)
-                fprintf(stderr, "CMD: %s -> %s\n", cmdbuf, resp);
+        
+        if (verbose) {
+            fprintf(stderr, "CMD: %s -> %s\n", cmdbuf, resp);
+            fflush(stderr);
+            }            
             return resp;
         }
 
