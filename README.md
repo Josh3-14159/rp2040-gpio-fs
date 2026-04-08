@@ -123,6 +123,26 @@ Plug the board back in normally — the filesystem mounts at `/mnt/rp2040` autom
 
 > **Note:** If you were added to the `dialout` group during installation, log out and back in before use.
 
+### Updating an existing installation
+
+If a previous installation is detected the installer will show all existing
+components and prompt before making any changes:
+
+\```
+  An existing installation was detected:
+    /usr/local/bin/rp2040fs
+    /usr/local/bin/rp2040fs-keepalive
+    /etc/systemd/system/rp2040fs@.service
+    /etc/systemd/system/rp2040fs-keepalive.service
+    /etc/udev/rules.d/99-rp2040-gpio-fs.rules
+
+  Update existing installation? [y/N]
+\```
+
+Answering `y` will stop all running services, unmount the filesystem if active,
+update all components, and restart cleanly. Answering `n` exits without making
+any changes.
+
 ---
 
 ## Repository layout
