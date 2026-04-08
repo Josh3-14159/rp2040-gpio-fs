@@ -57,6 +57,7 @@ static int pin_is_exposed(int pin) {
 static int serial_fd = -1;
 static pthread_mutex_t serial_lock = PTHREAD_MUTEX_INITIALIZER;
 static const char *device_path = "/dev/ttyACM0";
+static int verbose = 0;
 
 #define MAX_CONSECUTIVE_ERRORS 3
 static int consecutive_errors = 0;
@@ -161,6 +162,8 @@ static char *cmd(const char *fmt, ...) {
 
         if (serial_cmd(cmdbuf, resp, sizeof(resp)) == 0) {
             consecutive_errors = 0;
+            if (verbose)
+                fprintf(stderr, "CMD: %s -> %s\n", cmdbuf, resp);
             return resp;
         }
 
@@ -510,6 +513,9 @@ int main(int argc, char *argv[]) {
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--device") == 0 && i + 1 < argc) {
             device_path = argv[++i];
+        } else if (strcmp(argv[i], "--verbose") == 0 ||
+                   strcmp(argv[i], "-v") == 0) {
+            verbose = 1;
         } else {
             fuse_opt_add_arg(&args, argv[i]);
         }
