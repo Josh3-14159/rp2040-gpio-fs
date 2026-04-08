@@ -9,17 +9,12 @@
 
 set -euo pipefail
 
-# ----------------------------------------------------------------
-# Defaults
-# ----------------------------------------------------------------
 SERVICE="rp2040fs@${SUDO_USER:-$USER}"
 OUTFILE=""
 TEE_OUTPUT=0
 RESTARTED_VERBOSE=0
+SERVICE_FILE="/etc/systemd/system/rp2040fs@.service"
 
-# ----------------------------------------------------------------
-# Argument parsing
-# ----------------------------------------------------------------
 usage() {
     echo "Usage: $0 [-o <logfile>] [-t] [-s <service>]"
     echo "  -o  Write log to file"
@@ -38,35 +33,27 @@ while getopts "o:ts:h" opt; do
     esac
 done
 
-# ----------------------------------------------------------------
-# Cleanup — restore service to normal mode on exit
-# ----------------------------------------------------------------
 cleanup() {
     echo ""
     if [ "$RESTARTED_VERBOSE" -eq 1 ]; then
-        echo "Restoring service to normal (non-verbose) mode..."
-        sudo systemctl stop "$SERVICE" 2>/dev/null || true
-        sudo systemctl start "$SERVICE" 2>/dev/null || true
-        echo "Service restarted in normal mode."
+        echo "Reverting service file and restarting in normal mode..."
+        sudo sed -i 's/ --verbose//' "$SERVICE_FILE"
+        sudo systemctl daemon-reload
+        sudo systemctl restart "$SERVICE" 2>/dev/null || true
+        echo "Service restored to normal mode."
     fi
     echo "Logger stopped."
 }
 trap cleanup EXIT INT TERM
 
-# ----------------------------------------------------------------
-# Check the service is running
-# ----------------------------------------------------------------
 if ! systemctl is-active --quiet "$SERVICE" 2>/dev/null; then
     echo "Error: $SERVICE is not running."
     echo "Plug in the board and wait for the service to start, then retry."
     exit 1
 fi
 
-# ----------------------------------------------------------------
-# Check if verbose mode is active
-# ----------------------------------------------------------------
 is_verbose() {
-    sudo journalctl -u "$SERVICE" -n 20 --no-pager 2>/dev/null | grep -q "CMD:"
+    grep -q -- "--verbose" "$SERVICE_FILE" 2>/dev/null
 }
 
 if ! is_verbose; then
@@ -78,32 +65,28 @@ if ! is_verbose; then
     echo " Verbose mode is required to log serial traffic."
     echo ""
     echo " Options:"
-    echo "   y — restart the service in verbose mode now"
-    echo "       (will be restored to normal when logger exits)"
+    echo "   y — temporarily add --verbose to the service file and restart"
+    echo "       (the service file will be reverted when the logger exits)"
     echo "   n — exit without changes"
     echo ""
-    read -rp " Restart in verbose mode? [y/N] " CONFIRM
+    read -rp " Enable verbose mode? [y/N] " CONFIRM
     case "$CONFIRM" in
         [yY]|[yY][eE][sS])
             echo ""
+            echo "Adding --verbose to $SERVICE_FILE..."
+            sudo sed -i 's|ExecStart=/usr/local/bin/rp2040fs|ExecStart=/usr/local/bin/rp2040fs --verbose|' \
+                "$SERVICE_FILE"
+            sudo systemctl daemon-reload
             echo "Restarting $SERVICE in verbose mode..."
-            sudo systemctl stop "$SERVICE"
-            # Start with verbose flag directly, bypassing systemd
-            # so we can restore it cleanly on exit
-            sudo /usr/local/bin/rp2040fs /mnt/rp2040 \
-                --device /dev/rp2040_gpio_fs \
-                --verbose -f -s \
-                > /tmp/rp2040fs-verbose.log 2>&1 &
-            RP2040_PID=$!
+            sudo systemctl restart "$SERVICE"
             RESTARTED_VERBOSE=1
-            # Wait for it to come up
             sleep 2
-            if ! kill -0 $RP2040_PID 2>/dev/null; then
-                echo "Error: failed to start service in verbose mode."
-                echo "Check /tmp/rp2040fs-verbose.log for details."
+            if ! systemctl is-active --quiet "$SERVICE"; then
+                echo "Error: service failed to restart."
+                echo "Check: sudo journalctl -u $SERVICE"
                 exit 1
             fi
-            echo "Service running in verbose mode (PID $RP2040_PID)."
+            echo "Service running in verbose mode."
             echo ""
             ;;
         *)
@@ -113,9 +96,6 @@ if ! is_verbose; then
     esac
 fi
 
-# ----------------------------------------------------------------
-# Build the log pipeline
-# ----------------------------------------------------------------
 echo "========================================"
 echo " RP2040 Serial Logger"
 echo " Service:  $SERVICE"
@@ -139,28 +119,13 @@ format_line() {
     done
 }
 
-if [ "$RESTARTED_VERBOSE" -eq 1 ]; then
-    # Service was started directly — tail its log file
-    if [ -n "$OUTFILE" ]; then
-        if [ "$TEE_OUTPUT" -eq 1 ]; then
-            tail -f /tmp/rp2040fs-verbose.log | format_line | tee "$OUTFILE"
-        else
-            echo "Logging to $OUTFILE (silent — use -t to also print to screen)"
-            tail -f /tmp/rp2040fs-verbose.log | format_line >> "$OUTFILE"
-        fi
+if [ -n "$OUTFILE" ]; then
+    if [ "$TEE_OUTPUT" -eq 1 ]; then
+        sudo journalctl -fu "$SERVICE" | format_line | tee "$OUTFILE"
     else
-        tail -f /tmp/rp2040fs-verbose.log | format_line
+        echo "Logging to $OUTFILE (silent -- use -t to also print to screen)"
+        sudo journalctl -fu "$SERVICE" | format_line >> "$OUTFILE"
     fi
 else
-    # Service was already verbose — read from journal
-    if [ -n "$OUTFILE" ]; then
-        if [ "$TEE_OUTPUT" -eq 1 ]; then
-            sudo journalctl -fu "$SERVICE" | format_line | tee "$OUTFILE"
-        else
-            echo "Logging to $OUTFILE (silent — use -t to also print to screen)"
-            sudo journalctl -fu "$SERVICE" | format_line >> "$OUTFILE"
-        fi
-    else
-        sudo journalctl -fu "$SERVICE" | format_line
-    fi
+    sudo journalctl -fu "$SERVICE" | format_line
 fi
